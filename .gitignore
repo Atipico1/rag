@@ -1,0 +1,24 @@
+# dataset
+datasets/
+
+# model
+models/
+wikidata/
+
+# test file
+data_test.ipynb
+test.ipynb
+
+# json data file
+nq-train.json
+
+# venv
+.venv/
+
+# cache
+__pycache__/
+.ipynb_checkpoints/
+
+# test output
+test-output/
+sample/

@@ -11,7 +11,7 @@ from src.utils import BasicTimer, run_ner_linking
 
 ORIG_DATA_DIR = "datasets/original/"
 NORM_DATA_DIR = "datasets/normalized/"
-
+CUSTOM_DATA_DIR = "datasets/custom/"
 
 class QADataset(object):
     """
@@ -24,6 +24,7 @@ class QADataset(object):
         name: str,
         original_path: str,
         preprocessed_path: str,
+        custom_path: str = None,
         examples: typing.List[QAExample] = None,
     ):
         """Do not invoke directly. Use `new` or `load`.
@@ -38,6 +39,7 @@ class QADataset(object):
         self.name = name
         self.original_path = original_path
         self.preprocessed_path = preprocessed_path
+        self.custom_path = custom_path
         self.examples = examples
 
     @classmethod
@@ -55,7 +57,7 @@ class QADataset(object):
             original_path = os.path.join(ORIG_DATA_DIR, f"{name}.{file_suffix}")
             cls._download(name, url_or_path, original_path)
         preprocessed_path = cls._get_norm_dataset_path(name)
-        return cls(name, original_path, preprocessed_path)
+        return cls(name=name, original_path=original_path, preprocessed_path=preprocessed_path)
 
     @classmethod
     def load(cls, name: str):
@@ -75,7 +77,18 @@ class QADataset(object):
             examples = [QAExample.json_load(l) for l in inf.readlines()]
 
         print(f"Read {len(examples)} examples from {preprocessed_path}")
-        return cls(name, header["original_path"], preprocessed_path, examples)
+        return cls(name=name, original_path=header["original_path"], preprocessed_path=preprocessed_path, examples=examples)
+
+    @classmethod
+    def custom_load(cls, name: str):
+        custom_path = os.path.join(CUSTOM_DATA_DIR, f"{name}.jsonl.gz")
+        assert os.path.exists(custom_path), f"Custome dataset should be at {custom_path}."
+        with gzip.open(custom_path, "r") as inf:
+            header = json.loads(inf.readline())
+            assert header["dataset"] == name, "Header name doesn't match."
+            examples = [QAExample.json_load(l) for l in inf.readlines()]
+        print(f"Read {len(examples)} examples from {custom_path}")
+        return cls(name, header["original_path"], "", custom_path=custom_path, examples=examples)
 
     @classmethod
     def _get_norm_dataset_path(self, name: str):
@@ -100,6 +113,18 @@ class QADataset(object):
                 json.dump(ex.json_dump(), outf)
                 outf.write("\n")
         print(f"Saved preprocessed dataset to {self.preprocessed_path}")
+
+    def custom_save(self):
+        self.custom_path = os.path.join(CUSTOM_DATA_DIR, f"{self.name}.jsonl.gz")
+        os.makedirs(os.path.dirname(self.custom_path), exist_ok=True)
+        with gzip.open(self.custom_path, "wt") as outf:
+            json.dump({"dataset": self.name, "original_path": self.original_path}, outf)
+            outf.write("\n")
+            for ex in self.examples:
+                ex.embedding = ex.embedding.tolist()
+                json.dump(ex.json_dump(), outf)
+                outf.write("\n")
+        print(f"Saved custom dataset to {self.custom_path}")
 
     def read_original_dataset(self, file_path: str):
         """Reads the original/raw dataset into a List of QAExamples.
@@ -189,6 +214,22 @@ class SquadDataset(QADataset):
                         query=entry["question"],
                         context=entry["context"],
                         answers=entry["answers"]["text"]
+                    )
+                )
+        return examples
+
+class NQ(QADataset):
+    def read_original_dataset(self, file_path: str):
+        examples = []
+        with gzip.open(file_path, "rb") as file_handle:
+            data = json.load(file_handle)
+            for idx, entry in enumerate(data):
+                examples.append(
+                    QAExample.new(
+                        uid=idx,
+                        query=entry["question"],
+                        context=entry["ctxs"],
+                        answers=entry["answers"]
                     )
                 )
         return examples

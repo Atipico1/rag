@@ -26,15 +26,17 @@ DATASETS = {
     "SquadDataset":(
         SquadDataset,
         "datasets/squad.jsonl.gz"
-    )
+    ),
+    "NQ":{
+        NQ,
+        "https://dl.fbaipublicfiles.com/dpr/data/retriever_results/single/nq-test.json.gz"
+    }
 }
-
 
 def load_and_preprocess_dataset(args):
     dataset_class, url_or_path = DATASETS[args.dataset]
     dataset = dataset_class.new(args.dataset, url_or_path)
     dataset.preprocess(args.wikidata, args.ner_model, args.debug)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

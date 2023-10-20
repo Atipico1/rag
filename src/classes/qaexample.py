@@ -2,7 +2,7 @@ import json
 import re
 import typing
 from collections import Counter
-
+import numpy as np
 from src.classes.answer import Answer
 
 
@@ -18,6 +18,8 @@ class QAExample(object):
         is_substitute: bool = False,
         metadata: typing.Dict[str, str] = None,
         original_example: "QAExample" = None,
+        masked_query: str = None,
+        embedding: np.ndarray = None,
     ):
         """
         Do not invoke directly. Use `new` or `json_load`.
@@ -39,6 +41,8 @@ class QAExample(object):
         self.metadata = metadata
         self.is_substitute = is_substitute
         self.original_example = original_example
+        self.masked_query = masked_query
+        self.embedding = embedding
 
     @classmethod
     def new(
@@ -81,6 +85,8 @@ class QAExample(object):
             is_substitute=obj["is_substitute"],
             metadata=obj["metadata"],
             original_example=obj["original_example"],
+            masked_query=obj["masked_query"],
+            embedding =np.array(obj["embedding"])
         )
 
     @classmethod
@@ -89,11 +95,14 @@ class QAExample(object):
         
         Returns a list of (start index, end index) tuples.
         """
-        context_spans = [
-            (m.start(), m.end())
-            for m in re.finditer(re.escape(answer_text.lower()), context.lower())
-        ]
-        return context_spans
+        if isinstance(context, str):
+            context_spans = [
+                (m.start(), m.end())
+                for m in re.finditer(re.escape(answer_text.lower()), context.lower())
+            ]
+            return context_spans
+        else:
+            return [""]
 
     def json_dump(self, save_full: bool = False):
         """Creates a json dump of this QAExample.
@@ -103,11 +112,13 @@ class QAExample(object):
         save_obj = {
             "uid": self.uid,
             "query": self.query,
+            "masked_query": self.masked_query,
             "context": self.context,
             "metadata": self.metadata,
             "is_substitute": self.is_substitute,
             "gold_answers": [ga.json_dump() for ga in self.gold_answers],
             "original_example": None,
+            "embedding":self.embedding
         }
         if self.original_example:
             if save_full:
@@ -161,10 +172,25 @@ class QAExample(object):
                 self._find_answer_in_context(orig_answer.text, self.context)
             )
         # Find and replace all string variants that correspond to the original answer in the context
+        if isinstance(self.context, str):
+            replace_strs = set([self.context[span[0] : span[1]] for span in replace_spans])
+            for replace_str in replace_strs:
+                self.context = self.context.replace(replace_str, sub_answer.text)
+
+    def update_context_with_random_substitution(self, random_answer, replace_every_original_answer=True):
+        replace_spans = []
+        replace_answers = (
+            self.gold_answers
+            if replace_every_original_answer
+            else [a for a in self.gold_answers if a.is_answer_in_context()[0]]
+        )
+        for orig_answer in self.gold_answers:
+            replace_spans.extend(self._find_answer_in_context(orig_answer.text, self.context))
+        
         replace_strs = set([self.context[span[0] : span[1]] for span in replace_spans])
         for replace_str in replace_strs:
-            self.context = self.context.replace(replace_str, sub_answer.text)
-
+            self.context = self.context.replace(replace_str, random_answer)
+            
     def get_answers_in_context(self):
         """Find all gold answers that appear in the context passage, excluding those that don't."""
         return [ga for ga in self.gold_answers if ga.is_answer_in_context()]
@@ -181,5 +207,11 @@ class QAExample(object):
             return most_common_types[0][0]
         return None
 
-    def __repr__(self):
-        return f"{self.uid} | {self.query} | {self.context[:100]} ..."
+    # def __repr__(self):
+    #     return f"{self.uid} | {self.query} | {self.context[:100]} ..."
+    
+    def add_masked_query(self, masked_query: str):
+        self.masked_query = masked_query
+    
+    def add_embedding(self, embedding: np.ndarray):
+        self.embedding = embedding

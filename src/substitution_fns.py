@@ -159,6 +159,37 @@ def corpus_substitution_fn(
     print(f"Finished Corpus Substitution.")
     return new_exs
 
+def corpus_substitution(
+    data: QAExample,
+    dset: QADataset,
+    wikidata_info_path: str,
+    replace_every: bool,
+    num_samples: int,
+    category: str,
+)->typing.List[QAExample]:
+    answer_corpus_by_groups = group_answers_by_answer_type(dset)
+    data_ans_type = data.get_example_answer_type()
+    new_exs = []
+    if data_ans_type is not None:
+        if category.lower() == "all" or category.lower() == data_ans_type.lower():
+            for idx in range(num_samples):
+                sub_answer = select_random_non_identical_answer(data, answer_corpus_by_groups[data_ans_type])
+                new_ex = create_new_example(
+                    ex=data,
+                    new_id=f"corpus-sub-{idx}",
+                    answer_text=sub_answer.text,
+                    ner_label=sub_answer.ner_label,
+                    kb_id=sub_answer.kb_id,
+                    wikidata_label=sub_answer.wikidata_label,
+                    aliases=sub_answer.aliases,
+                    wikidata_types=sub_answer.wikidata_types,
+                    wikipedia_page=sub_answer.wikipedia_page,
+                    popularity=sub_answer.popularity,
+                    answer_type=sub_answer.answer_type,
+                    replace_every_original_answer=replace_every,
+                )
+                new_exs.append(new_ex)
+    return new_exs
 
 def popularity_substitution_fn(
     dset: QADataset,
