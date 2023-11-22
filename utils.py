@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import re
@@ -6,12 +7,16 @@ import torch
 from tqdm import tqdm
 import openai
 from collections import Counter
-from typing import Callable, List, Tuple
+from typing import Union, Callable, List, Tuple, Dict
 import numpy as np
 import tiktoken
+from src.classes.cbr_data import NQExample
+from src.classes.qaexample import QAExample
+from src.classes.answer import Answer
 from src.classes.prompt import PromptSet
-
-
+import wikipedia
+import time
+import random
 
 def normalize_question(question: str):
     if not question.endswith("?"):
@@ -19,7 +24,18 @@ def normalize_question(question: str):
 
     return question[0].lower() + question[1:]
 
+def accuracy(preds, labels):
+    match_count = 0
+    for pred, label in zip(preds, labels):
+        target = label[0]
+        if pred == target:
+            match_count += 1
+
+    return 100 * (match_count / len(preds))
+
 def normalize_answer(s: str):
+    if not s:
+        return ""
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
 
@@ -45,147 +61,84 @@ def text_has_answer(answers, text) -> bool:
             return True
     return False
 
-def build_qa_prompt(example: PromptSet, format_prompts):
-    q = normalize_question(example.query)
-    if not example.fewshots:
-        if example.num_docs == 0:
-            #format_prompt = format_prompts["without_knowledge"]
-            ex_prompt = f"Answer these questions:\nQuestion: when is the publishers clearing house sweepstakes drawing?\nAnswer: just after the Super Bowl\nQ: {q}\nA:"
-        elif example.num_docs == 1:
-            format_prompt = format_prompts
-            knolwedge = example.supports[0].text
-            ex_prompt = format_prompt + f"Knowledge: {knolwedge}\nQuestion: {q}\nAnswer:"
-        else:
-            format_prompt = format_prompts
-            knolwedge = "\n".join([wiki.text for wiki in example.supports])
-            ex_prompt = format_prompt + f"Knowledge: {knolwedge}\nQuestion: {q}\nAnswer:"
-    else:
-        fewshot = example.fewshots
-        knolwedge = "\n".join([wiki.text for wiki in example.supports])
-        ex_prompt = ""
-        for shot in fewshot:
-            shot_q, shot_a, shot_c = shot.question, shot.answer, shot.context
-            ex_prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n"
-        ex_prompt += f"Knolwedge: {knolwedge}\nQuestion: {q}\nAnswer:"
-    return ex_prompt
-
-def em(prediction, ground_truth, normalize_fn):
-    return float(normalize_fn(prediction) == normalize_fn(ground_truth))
-
-def f1(prediction, ground_truth, normalize_fn):
-    prediction_tokens = normalize_fn(prediction).split()
-    ground_truth_tokens = normalize_fn(ground_truth).split()
-    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
-    num_same = sum(common.values())
-
-    if num_same == 0:
-        return 0
-    precision = 1.0 * num_same / len(prediction_tokens)
-    recall = 1.0 * num_same / len(ground_truth_tokens)
-    f1 = (2 * precision * recall) / (precision + recall)
-    return f1
-
-def exact_match(prediction, ground_truth):
-    # print(f"Pred : {normalize_answer(prediction)}")
-    # print(f"ANS : {normalize_answer(ground_truth)}")
-    return normalize_answer(prediction) == normalize_answer(ground_truth)
-
-
 def get_answer_from_model_output(outputs, tokenizer, prompt):
     generation_str = tokenizer.decode(outputs[0].cpu(), skip_special_tokens=True)
     generation_str = generation_str[len(prompt):]
     answer = generation_str.split("\n")[0]
     return answer, generation_str
 
-def f1_score(prediction, ground_truths, normalize_fn: Callable[[str], str] = lambda x: x):
-    return max([f1(prediction, gt, normalize_fn) for gt in ground_truths])
+def generate_answer_from_gpt(prompt: List[str], max_tokens: int):
+    max_try = 0
+    while max_try < 3:
+        try:
+            response = openai.Completion.create(
+            model="gpt-3.5-turbo-instruct",
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0
+            )
+            return [res["text"] for res in response["choices"]]
+        except Exception as e:
+            print(f"GPT API Error : {e}")
+            max_try += 1
+            time.sleep(3)
+    print("GPT Failed to generate answer")
+    return ""
 
-
-def exact_match_score(prediction, ground_truths, normalize_fn: Callable[[str], str] = lambda x: x):
-    return max([em(prediction, gt, normalize_fn) for gt in ground_truths])
-
-def get_answer_from_gpt(prompt: str, max_tokens: int):
-    response = openai.Completion.create(
-    model="gpt-3.5-turbo-instruct",
-    prompt=prompt,
-    max_tokens=max_tokens,
-    temperature=0
-    )
-    return response["choices"][0]["text"]
-
-def get_format_prompt(num_shot) -> str:
+def get_format_prompt(num_shot:int, examples_type:str) -> str:
+    if examples_type == "zero":
+        return ""
+    format_path = f"datasets/format_prompt_{examples_type}.txt"
     output = ""
-    with open("datasets/format_prompt.txt", "r") as f:
+    with open(format_path, "r") as f:
         lines = f.readlines()
-    for i in range(num_shot*3):
-        output += lines[i]
+    for i in range(1, num_shot*3+1):
+        output += lines[i-1]
+        if i % 3 == 0:
+            output += "\n"
     return output
 
-def evaluation(dataset: List[PromptSet],
-               metadata: dict,
-               output_dir="test-output/",
-               num_shot=5,
-               num_docs=10,
-               max_tokens_to_generate=10,
-               is_test=False,
-               max_test=10):
-    idx, num_correct, num_has_answer, num_tokens, is_recall = 0, 0, 0, 0, 0
-    sample_prompt = None
-    for_test = []
-    encoder = tiktoken.get_encoding("cl100k_base")
-    openai.api_key = "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"
-    format_prompt = get_format_prompt(num_shot)
-    if is_test:
-        dataset = dataset[:max_test]
-    for data in (tq := tqdm(dataset, desc=f"EM:  0.0%")):
-        answers = data.answers
-        prompt = build_qa_prompt(data, format_prompts=format_prompt)
-        if idx == 0:
-            print("Sample :\n", prompt, format_prompt)
-            sample_prompt = prompt
-        has_answer = text_has_answer(answers, prompt)
-        prediction = get_answer_from_gpt(prompt, max_tokens_to_generate)
-        is_correct = exact_match_score(prediction, answers, normalize_answer)
-        idx += 1
-        num_tokens += len(encoder.encode(prompt))
-        num_correct += int(is_correct)
-        num_has_answer += int(has_answer)
-        is_recall += int(is_correct & has_answer)
-        for_test.append({"Prompt":prompt,
-                        "answers":answers,
-                        "prediction":prediction,
-                        "is_correct":is_correct})
-        tq.set_description(f"EM: {num_correct / idx * 100:4.1f}%")
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-    with open(os.path.join(output_dir, "eval_test.json"), "w") as f:
-        json.dump(for_test, f)
-    em = round(num_correct / idx * 100, 3)
-    has_answer = round(num_has_answer / idx * 100, 3)
-    num_tokens = round(num_tokens / idx, 3)
-    recall = round(is_recall / num_has_answer, 3)
-    print(f"EM: {em:.1f}%")
-    print(f"% of prompts with answer: {num_has_answer / idx * 100:.1f}%")
-    if output_dir is not None:
-        d = {"em": em, "has_answer(%)": has_answer, "recall":recall, "num_datasets": idx,
-             "max_token":max_tokens_to_generate, "num_docs":num_docs, "num_tokens":num_tokens}
-        [d.update({k:v}) for k, v in metadata.items()]
-        with open(os.path.join(output_dir, "eval.json"), "w") as f:
-            f.write(json.dumps(d) + "\n")
-        if sample_prompt is not None:
-            with open(os.path.join(output_dir, "example_prompt.txt"), "w") as f:
-                f.write(sample_prompt)
-    return d
-def find_topk(query: np.ndarray, key: List[np.ndarray], topk: int=10) -> List[int]:
+#TODO : query와 완전히 똑같은 few-shot은 제외하는 로직 추가
+def find_topk(query: np.ndarray,
+              key: List[np.ndarray],
+              value: Union[List[QAExample], List[NQExample]],
+              topk: int=10,
+              filter_same_questions: bool = True,
+              filtering_threshold: float = 0.95,
+              random_selection: bool = False) -> List[int]:
     """
-    query: [dim]
+    query: [1, dim]
     key: [num_dataset, dim]
+    output : [num_dataset, 1]
+    res : list of integer, indices of topk
     """
+    normalized_query = query / np.linalg.norm(query)
+    normalized_key = np.array([k / np.linalg.norm(k) for k in key])
     if topk == 0:
         return []
-    key_matrix = np.array(key)
-    output = np.matmul(key_matrix, query.T)
-    res = list(np.argpartition(output, -topk)[-topk:])
-    return res
+    if len(value) <= topk:
+        print("Few-shot examples are less than topk : ", len(value))
+        return value
+    output = np.matmul(normalized_key, normalized_query.T)
+    if filter_same_questions:
+        res = []
+        res.extend(list(np.argpartition(output, -topk)[-1:]))
+        i = 2
+        while len(res) < topk:
+            is_same = False
+            for e in res:
+                kth_largest = np.argpartition(output, -i)[-i]
+                if cosine_similarity(normalized_key[kth_largest], normalized_key[e]) >= filtering_threshold:
+                    is_same = True
+            if not is_same:
+                res.append(kth_largest)
+            i += 1
+        return [value[int(idx)] for idx in res]
+    else:
+        return [value[int(idx)] for idx in list(np.argpartition(output, -topk)[-topk:])]
 
 def cal_num_tokens(encoder, input: str) -> int:
     return len(encoder.encode(input))
@@ -194,6 +147,153 @@ def find_sentence_with_span(span: Tuple[int, int], sentences: List[str]) -> Tupl
     cur_idx = 0
     for sent_idx, sent in enumerate(sentences):
         for char_idx, char in enumerate(list(sent)):
-            if span[0] == cur_idx:
+            if cur_idx >= span[0]:
                 return sent_idx, sent
             cur_idx += 1
+        cur_idx += 1
+
+def extract_wiki_page(page_name: str):
+    try:
+        return wikipedia.page(page_name).content
+    except:
+        return None
+
+def normalize_passage(ctx_text: str):
+    ctx_text = ctx_text.replace("\n", " ").replace("’", "'")
+    if ctx_text.startswith('"'):
+        ctx_text = ctx_text[1:]
+    if ctx_text.endswith('"'):
+        ctx_text = ctx_text[:-1]
+    return ctx_text
+
+def check_answer(contexts: List[str], answers: List[str]) -> List[str]:
+    output = []
+    for context in contexts:
+        has_answer = False
+        for answer in answers:
+            if answer in context.lower():
+                has_answer = True
+        if not has_answer and len(context.split()) < 60:
+            output.append(context)
+    return output
+    
+def merge_sentence(input: List[str], step: int=3) -> List[str]:
+    output = []
+    cnt = 0
+    buffer = ""
+    while input != []:
+        buffer += input.pop() + " "
+        cnt += 1
+        if cnt == step:
+            output.append(buffer.strip())
+            cnt = 0
+            buffer = ""
+    if buffer:
+        output.append(buffer.strip())
+    return output
+
+def make_adversarial(sent_idx: int, sents: List[str], sent_len: int, adversary: str, strategy: str) -> str:
+    if strategy == "replace":
+        mid = sent_len//2
+        if sent_idx < mid:
+            sents = sents[:mid]
+            return " ".join(sents) + " " + adversary
+        else:
+            sents = sents[mid:]
+            return adversary + " " + " ".join(sents)
+    elif strategy == "add":
+        return " ".join(sents) + " " + adversary
+    else:
+        raise NotImplementedError
+    
+def get_instruction(instruction_type: str) -> str:
+    with open("/home/seongilpark/rag/datasets/instructions.txt", "r") as f:
+        lines = f.readlines()
+        instruct_dict = {line.split("||")[0]:line.split("||")[1].replace("\n", "")+"\n\n" for line in lines}
+    return instruct_dict[instruction_type]
+
+def str2bool(v):
+    if isinstance(v, bool):
+       return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+    
+def check_same_answers_in(query: List[str] , key: List[str]) -> bool:
+    """
+    query: List[str]
+    key: List[str]
+    """
+    for ans in query:
+        for key_ans in key:
+            if normalize_answer(ans) == normalize_answer(key_ans):
+                return True
+    return False
+
+def get_answer(input: Union[NQExample, QAExample]) -> List[str]:
+    if isinstance(input, NQExample):
+        return input.answers
+    elif isinstance(input, QAExample):
+        return [gold.text for gold in input.gold_answers]
+
+def get_answers(inputs: Union[List[NQExample], List[QAExample]]) -> List[List[str]]:
+    if isinstance(inputs[0], NQExample):
+        return [input.answers for input in inputs]
+    elif isinstance(inputs[0], QAExample):
+        return [[gold.text for gold in input.gold_answers] for input in inputs]
+
+def get_question(input: Union[NQExample, QAExample]) -> str:
+    if isinstance(input, NQExample):
+        return input.question
+    elif isinstance(input, QAExample):
+        return input.query
+
+def get_questions(inputs: Union[List[NQExample], List[QAExample]]) -> List[str]:
+    if isinstance(inputs[0], NQExample):
+        return [input.question for input in inputs]
+    elif isinstance(inputs[0], QAExample):
+        return [input.query for input in inputs]
+
+def find_conflict_between_ctxs(ctxs: List[str], query: str, nlp, args: dict) -> bool:
+    qa_input = [{"question":query, "context":ctx} for ctx in ctxs]
+    results = nlp(qa_input)
+    pred_answer = [result["answer"].lower().strip() for result in results]
+    if len(set(pred_answer)) == 1:
+        return False
+    else:
+        return True
+    
+def determine_perturbation_type(data: PromptSet, model:dict, args: dict):
+    model["nli"]["model"].eval()
+    query = data.query
+    ctxs = [ctx.text for ctx in data.supports]
+    features = model["nli"]["tokenizer"]([query]*len(ctxs), ctxs, padding="max_length", truncation=True, max_length=256, return_tensors="pt").to(args["device"])
+    with torch.no_grad():
+        scores = torch.nn.functional.sigmoid(model["nli"]["model"](**features).logits).detach().cpu().numpy()
+        if np.where(scores > 0.5)[0].size == 0:
+            return "no_relevant_ctx"
+        else:
+            relevant_ctxs = [ctxs[idx] for idx in np.where(scores > 0.5)[0]]
+            if len(relevant_ctxs) <= 1:
+                return "one_relevant_ctx"
+            else:
+                if find_conflict_between_ctxs(relevant_ctxs, query, model["nlp"], args):
+                    return "conflict"
+                else:
+                    return "many_relevant_ctx"
+
+def generate_answer(prompt, args):
+    pass
+
+def get_answer_from_lm(batch_prompt: List[str], args: dict) -> str:
+    if args["lm"] == "gpt-3.5-turbo-instruct":
+        return generate_answer_from_gpt(batch_prompt, args["max_tokens"])
+    elif args["lm"] == "gpt-3.5-turbo-16k":
+        return generate_answer_from_gpt(batch_prompt, args["max_tokens"])
+    elif args["lm"] == "mistral-instruct":
+        return generate_answer(batch_prompt, args)
+    elif args["lm"] == "llama2-7b-chat":
+        return generate_answer(batch_prompt, args)

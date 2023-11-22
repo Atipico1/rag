@@ -27,15 +27,26 @@ DATASETS = {
         SquadDataset,
         "datasets/squad.jsonl.gz"
     ),
+    "HF_SquadDataset":(
+        SquadDataset,
+        "squad",
+    ),
     "NQ":{
         NQ,
         "https://dl.fbaipublicfiles.com/dpr/data/retriever_results/single/nq-test.json.gz"
+    },
+    "NQTrain":{
+        NQ,
+        "https://dl.fbaipublicfiles.com/dpr/data/retriever_results/single/nq-train.json.gz"
     }
 }
 
 def load_and_preprocess_dataset(args):
     dataset_class, url_or_path = DATASETS[args.dataset]
-    dataset = dataset_class.new(args.dataset, url_or_path)
+    if args.dataset.startswith("HF"):
+        dataset = dataset_class.hf_new(args.dataset, url_or_path, args.split_option)
+    else:
+        dataset = dataset_class.new(args.dataset, url_or_path)
     dataset.preprocess(args.wikidata, args.ner_model, args.debug)
 
 if __name__ == "__main__":
@@ -46,6 +57,13 @@ if __name__ == "__main__":
         choices=list(DATASETS.keys()),
         required=True,
         help=f"Name of the dataset. Must be one of {list(DATASETS.keys())}",
+    )
+    parser.add_argument(
+        "-s",
+        "--split_option",
+        choices=["train", "dev", "test", "all"],
+        required=False,
+        help=f"Split option of the dataset. Must be one of ['train', 'dev', 'test', 'all']",
     )
     parser.add_argument(
         "-w",

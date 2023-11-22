@@ -3,7 +3,7 @@ import json
 import os
 import typing
 from collections import defaultdict
-
+import jsonlines
 import wget
 
 from src.classes.qaexample import QAExample
@@ -57,6 +57,31 @@ class QADataset(object):
             original_path = os.path.join(ORIG_DATA_DIR, f"{name}.{file_suffix}")
             cls._download(name, url_or_path, original_path)
         preprocessed_path = cls._get_norm_dataset_path(name)
+        return cls(name=name, original_path=original_path, preprocessed_path=preprocessed_path)
+
+    @classmethod
+    def hf_new(cls, name: str, url_or_path: str, split_option="train"):
+        from datasets import load_dataset, concatenate_datasets
+        original_path = os.path.join(ORIG_DATA_DIR, f"{name}_{split_option}.jsonl.gz")
+        if os.path.exists(original_path):
+            original_path = original_path
+        else:
+            dataset = load_dataset(url_or_path)
+            if split_option == "all":
+                dataset = concatenate_datasets([dataset[split_op] for split_op in dataset.keys()])
+            elif split_option =="dev":
+                dataset = dataset["validation"]
+            elif split_option == "train":
+                dataset = dataset["train"]
+            elif split_option == "test":
+                dataset = dataset["test"]
+            else:
+                raise NotImplementedError
+            dataset.to_json(original_path[:-3])
+            with open(original_path[:-3], 'rb') as f_in:
+                with gzip.open(original_path, 'wb') as f_out:
+                    f_out.writelines(f_in)
+        preprocessed_path = os.path.join(NORM_DATA_DIR, f"{name}_{split_option}.jsonl.gz")
         return cls(name=name, original_path=original_path, preprocessed_path=preprocessed_path)
 
     @classmethod
@@ -202,20 +227,21 @@ class QADataset(object):
         print("-------------------------------------------")
 
 class SquadDataset(QADataset):
-
     def read_original_dataset(self, file_path: str):
         examples = []
         with gzip.open(file_path, "rb") as file_handle:
-            for entry in file_handle:
-                entry = json.loads(entry)
-                examples.append(
-                    QAExample.new(
-                        uid=entry["id"],
-                        query=entry["question"],
-                        context=entry["context"],
-                        answers=entry["answers"]["text"]
+                for entry in file_handle:
+                    entry = json.loads(entry)
+                    examples.append(
+                        QAExample.new(
+                            uid=entry["id"],
+                            query=entry["question"],
+                            context=entry["context"],
+                            answers=entry["answers"]["text"],
+                            title=entry["title"],
+                            metadata={},
+                        )
                     )
-                )
         return examples
 
 class NQ(QADataset):
@@ -229,7 +255,8 @@ class NQ(QADataset):
                         uid=idx,
                         query=entry["question"],
                         context=entry["ctxs"],
-                        answers=entry["answers"]
+                        answers=entry["answers"],
+                        title=""
                     )
                 )
         return examples

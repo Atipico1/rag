@@ -20,6 +20,7 @@ class QAExample(object):
         original_example: "QAExample" = None,
         masked_query: str = None,
         embedding: np.ndarray = None,
+        title: str = None
     ):
         """
         Do not invoke directly. Use `new` or `json_load`.
@@ -43,6 +44,7 @@ class QAExample(object):
         self.original_example = original_example
         self.masked_query = masked_query
         self.embedding = embedding
+        self.title = title
 
     @classmethod
     def new(
@@ -53,6 +55,7 @@ class QAExample(object):
         answers: typing.List[str],
         is_substitute: bool = False,
         metadata: typing.Dict[str, str] = None,
+        title: str = None
     ):
         """Instantiates and returns a new QAExample.
 
@@ -71,6 +74,7 @@ class QAExample(object):
             is_substitute=is_substitute,
             metadata=metadata,
             original_example=None,
+            title=title
         )
 
     @classmethod
@@ -86,7 +90,8 @@ class QAExample(object):
             metadata=obj["metadata"],
             original_example=obj["original_example"],
             masked_query=obj["masked_query"],
-            embedding =np.array(obj["embedding"])
+            embedding =np.array(obj["embedding"]),
+            title=obj["title"]
         )
 
     @classmethod
@@ -118,7 +123,8 @@ class QAExample(object):
             "is_substitute": self.is_substitute,
             "gold_answers": [ga.json_dump() for ga in self.gold_answers],
             "original_example": None,
-            "embedding":self.embedding
+            "embedding":self.embedding,
+            "title":self.title
         }
         if self.original_example:
             if save_full:
@@ -206,12 +212,10 @@ class QAExample(object):
         if most_common_types:
             return most_common_types[0][0]
         return None
-
-    # def __repr__(self):
-    #     return f"{self.uid} | {self.query} | {self.context[:100]} ..."
     
-    def add_masked_query(self, masked_query: str):
-        self.masked_query = masked_query
-    
-    def add_embedding(self, embedding: np.ndarray):
-        self.embedding = embedding
+    def test_print(self):
+        print("uid: ", self.uid)
+        print("query: ", self.query)
+        print("context: ", self.context if isinstance(self.context, str) else self.context[0])
+        print("gold_answers: ", [ans.text for ans in self.gold_answers])
+        print("metadata: ", self.metadata)

@@ -17,8 +17,18 @@ nq-train.json
 
 # cache
 __pycache__/
+*/__pycache__/
 .ipynb_checkpoints/
 
 # test output
 test-output/
 sample/
+
+#log file
+log/
+
+#datasets
+datasets/
+
+#wandb
+wandb/
