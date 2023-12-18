@@ -192,7 +192,7 @@ def TASA(data: pd.DataFrame, args) -> pd.DataFrame:
     return data
 
 def gpt(data: pd.DataFrame, args):
-    client = OpenAI(api_key="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")
+    client = OpenAI(api_key=os.getenv("OPENAI_APIKEY"))
     prompts = make_prompt(data, args)
     result = []
     for i in tqdm(range(0, len(prompts), 20)):
