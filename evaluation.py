@@ -1,3 +1,6 @@
+import random
+
+import tiktoken
 from dataset import knowledge_separation
 from src.classes.prompt import FewshotPrompt
 from utils import *
@@ -7,11 +10,9 @@ from copy import deepcopy
 from metrics import *
 from transformers import AutoTokenizer
 
-def make_examples(data: PromptSet, ex_num: int, ex_type:str, unanswerable_cnt: int=1) -> str:
+def make_examples(data: PromptSet, ex_num: int, ex_type:str, unanswerable_cnt, formatting=False) -> str:
     if ex_num == 0:
         return ""
-    if len(ex_type.split("_")) == 1:
-        print("EX TYPE:", ex_type, "---\n")
     head, tail = ex_type.split("_")
     output = ""
     if head == "random":
@@ -58,9 +59,14 @@ def make_examples(data: PromptSet, ex_num: int, ex_type:str, unanswerable_cnt: i
         elif tail == "exact":
             for ex in examples:
                 context = sorted(list(filter(lambda x: x.has_answer, ex.contexts)), key=lambda x: x.score, reverse=True)[0].text
-                output += ("Knowledge: " + context + "\n")
-                output += ("Question: " + ex.question + "\n")
-                output += ("Answer: " + ex.answers[0] + "\n\n") 
+                if formatting:
+                    output += ("Knowledge: " + context + "\n")
+                    output += ("Question: " + ex.question + "\n")
+                    output += ("Based on this knowledge, the answer is " + ex.answers[0] + "\n\n")
+                else:
+                    output += ("Knowledge: " + context + "\n")
+                    output += ("Question: " + ex.question + "\n")
+                    output += ("Answer: " + ex.answers[0] + "\n\n") 
         else:
             no_answer_idx = []
             for i, ex in enumerate(examples[:ex_num]):
@@ -84,7 +90,7 @@ def make_examples(data: PromptSet, ex_num: int, ex_type:str, unanswerable_cnt: i
                 output += ("Question: " + ex.question + "\n")
                 output += ("Answer: " + ex.answers[0] + "\n\n")
     else:
-        output = get_format_prompt(ex_num, tail)
+        output = get_format_prompt(ex_num, len(data.supports), tail)
     return output
 
 def make_adaptive_perturbations(data: PromptSet, adaptive_type: str, args: dict) -> List[FewshotPrompt]:
@@ -141,7 +147,7 @@ def make_adaptive_perturbations(data: PromptSet, adaptive_type: str, args: dict)
 def build_qa_prompt_for_gpt(data: PromptSet, model:dict, model_name: str, args: dict, instruction:str, encoder) -> str:
     q = normalize_question(data.query)
     prompt = instruction
-    format_prompts = make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"])
+    format_prompts = make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"], args["formatting"])
     if data.supports == []:
         return f"Answer the question:\n\nQuestion: {q}\nAnswer:"
     knowledge = "\n".join([wiki.text for wiki in data.supports])
@@ -158,7 +164,8 @@ def build_qa_prompt_for_gpt(data: PromptSet, model:dict, model_name: str, args: 
             output = determine_perturbation_type(data, model, args)
             data.fewshots = make_adaptive_perturbations(data, output, args)
     if model_name == "ours":
-        for shot in data.fewshots:
+        fewshots: List[FewshotPrompt] = data.fewshots[-1] if len(data.fewshots) > 1 else data.fewshots
+        for shot in fewshots:
             shot_q, shot_a, shot_c = shot.question, shot.answer, shot.context
             shot_c = knowledge_separation(shot.perturbation_type, shot_c)
             prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"            
@@ -171,8 +178,10 @@ def build_qa_prompt_for_gpt(data: PromptSet, model:dict, model_name: str, args: 
         return build_qa_prompt_for_gpt(data, model, model_name, args, instruction, encoder)
     return prompt
 
-def build_qa_prompt_for_llama(data: PromptSet, model:dict, model_name: str, args: dict, instruction:str, encoder) -> str:
+def build_qa_prompt_for_llama_chat(data: PromptSet, model:dict, model_name: str, args: dict, instruction:str, encoder) -> str:
     q = normalize_question(data.query)
+    if data.supports == []:
+        return f"<s>[INST] <<SYS>\n<</SYS>>>Answer the question:\nQuestion: {q}\nAnswer:[/INST]"
     knowledge = "\n".join([wiki.text for wiki in data.supports])
     prompt = "[INST] <<SYS>>\n" + instruction +"<</SYS>>\n"
     if model_name == "ours":
@@ -182,48 +191,154 @@ def build_qa_prompt_for_llama(data: PromptSet, model:dict, model_name: str, args
             prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"            
         prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nAnswer: [/INST]"
     else:
-        prompt += make_examples(data, args["ex_type"], args["unanswerable_cnt"])
+        prompt += make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"])
         prompt += f"Knowledge: {knowledge}\nQuestion: {q}\nAnswer: [/INST]"
-    if len(encoder.encode(prompt)) > 4000:
+    if len(encoder.encode(prompt)) > (4096-args["max_tokens"]):
         data.supports.pop()
         return build_qa_prompt_for_llama(data, model, model_name, args, instruction, encoder)
     return prompt
 
+def build_qa_prompt_for_llama(data: PromptSet, model:dict, model_name: str, args: dict, instruction:str, encoder) -> str:
+    q = normalize_question(data.query)
+    if data.supports == []:
+        return f"Answer the question:\nQ: {q}\nA:"
+    if args["num_wiki"] == 1:
+        title = data.supports[0].title
+        text = data.supports[0].text        
+        return f"{title}\n\n{text}\n\nBased on this text, answer these questions:\nQ: {q}\nA:"
+    else:
+        docs_text = "\n\n".join([f"{ctx.title}\n\n{ctx.text}" for ctx in data.supports[:args["num_wiki"]]])
+        return f"{docs_text}\n\nBased on these texts, answer these questions:\nQ: {q}\nA:"
+    #knowledge = "\n".join([wiki.text for wiki in data.supports])
+    
+    # prompt = instruction
+    # if model_name == "ours":
+    #     for shot in data.fewshots:
+    #         shot_q, shot_a, shot_c = shot.question, shot.answer, shot.context
+    #         shot_c = knowledge_separation(shot.perturbation_type, shot_c)
+    #         prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"            
+    #     prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nAnswer: [/INST]"
+    # else:
+    #     prompt += make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"])
+    #     prompt += f"Knowledge: {knowledge}\nQuestion: {q}\nAnswer: [/INST]"
+    # if len(encoder.encode(prompt)) > (4096-args["max_tokens"]):
+    #     data.supports.pop()
+    #     return build_qa_prompt_for_llama(data, model, model_name, args, instruction, encoder)
+    # return prompt
+
 def build_qa_prompt_for_mistral(data: PromptSet, model:dict, model_name: str, args: dict, instruction:str, encoder) -> str:
     q = normalize_question(data.query)
+    if data.supports == []:
+        if args["formatting"]:
+            return f"<s>[INST]Answer the question:\n\nQuestion: {q}\nThe answer is[/INST]"
+        return f"<s>[INST]Answer the question:\n\nQuestion: {q}\nAnswer:[/INST]"
     knowledge = "\n".join([wiki.text for wiki in data.supports])
     prompt = "<s>[INST] " + instruction
     if model_name == "ours":
-        for shot in data.fewshots:
+        for shot in data.fewshots[-1]:
+            if args["selective_perturbation"]:
+                if shot.perturbation_type not in args["selective_perturbation"]:
+                    continue
             shot_q, shot_a, shot_c = shot.question, shot.answer, shot.context
             shot_c = knowledge_separation(shot.perturbation_type, shot_c)
-            prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"            
-        prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nAnswer: [/INST]"
-    else:
-        prompt += make_examples(data, args["ex_type"], args["unanswerable_cnt"])
+            if args["formatting"]:
+                prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nBased on this knowledge, the answer is {shot_a}\n\n"
+            else:
+                prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"
+        if args["formatting"]:
+            prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nBased on this knowledge, the answer is[/INST]"
+        else:
+            prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nAnswer:[/INST]"
+    elif model_name == "baseline":
+        prompt += make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"])
         prompt += f"Knowledge: {knowledge}\nQuestion: {q}\nAnswer: [/INST]"
-    if len(encoder.encode(prompt)) > 8000:
+    else:
+        prompt += make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"], args["formatting"])
+        for shot in data.fewshots[-1]:
+            if args["selective_perturbation"]:
+                if shot.perturbation_type not in args["selective_perturbation"]:
+                    continue
+            shot_q, shot_a, shot_c = shot.question, shot.answer, shot.context
+            shot_c = knowledge_separation(shot.perturbation_type, shot_c)
+            if args["formatting"]:
+                prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nBased on this knowledge, the answer is {shot_a}\n\n"
+            else:
+                prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"
+        if args["formatting"]:
+            prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nBased on this knowledge, the answer is[/INST]"
+        else:
+            prompt += f"Knolwedge: {knowledge}\nQuestion: {q}\nAnswer:[/INST]"    
+    if len(encoder.encode(prompt)) > (8192-args["max_tokens"]):
         data.supports.pop()
-        return build_qa_prompt_for_llama(data, model, model_name, args, instruction, encoder)    
+        return build_qa_prompt_for_mistral(data, model, model_name, args, instruction, encoder)    
     return prompt
 
 def build_qa_prompt(data, model, model_name, args, instruction, encoder) -> str:
     if args["lm"] in ["gpt-3.5-turbo-instruct", "gpt-3.5-turbo-16k"]:
         prompt = build_qa_prompt_for_gpt(data, model, model_name, args, instruction, encoder)
-    elif args["lm"] in ["mistral-instruct"]:
-        prompt = build_qa_prompt_for_mistral(data, model, model_name, args, instruction, encoder)
-    elif args["lm"] in ["llama2-7b-chat", "llama2-13b-chat"]:
-        prompt = build_qa_prompt_for_llama(data, model, model_name, args, instruction, encoder)
+    elif args["lm"].startswith("mistral"):
+        if args["ensemble"]:
+            prompt = build_ensemble_qa_prompt_for_mistral(data, model_name, args, instruction)
+        else:
+            prompt = build_qa_prompt_for_mistral(data, model, model_name, args, instruction, encoder)
+    elif args["lm"].startswith("Llama"):
+        if "chat" in args["lm"]:
+            prompt = build_qa_prompt_for_llama_chat(data, model, model_name, args, instruction, encoder)
+        else:
+            prompt = build_qa_prompt_for_llama(data, model, model_name, args, instruction, encoder)
     else:
         raise NotImplementedError
     return prompt
 
+def build_ensemble_qa_prompt_for_mistral(data: PromptSet, model_name: str, args: dict, instruction:str) -> List[str]:
+    q = normalize_question(data.query)
+    prompts = []
+    if data.supports == []:
+        return f"<s>[INST]Answer the question:\n\nQuestion: {q}\nAnswer:[/INST]"
+    for wiki in data.supports:
+        prompt = "<s>[INST]" + instruction
+        if model_name == "ours":
+            fewshots: List[FewshotPrompt] = data.fewshots[-1] if len(data.fewshots) > 1 else data.fewshots
+            for shot in fewshots:
+                shot_q, shot_a, shot_c = shot.question, shot.answer, shot.context
+                shot_c = knowledge_separation(shot.perturbation_type, shot_c)
+                if args["formatting"]:
+                    prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nBased on this knowledge, the answer is {shot_a}\n\n"
+                else:
+                    prompt += f"Knolwedge: {shot_c}\nQuestion: {shot_q}\nAnswer: {shot_a}\n\n"         
+            if args["formatting"]:
+                prompt += f"Knolwedge: {wiki.text}\nQuestion: {q}\nBased on this knowledge, the answer is[/INST]"
+            else:
+                prompt += f"Knolwedge: {wiki.text}\nQuestion: {q}\nAnswer:[/INST]"
+        else:
+            prompt += make_examples(data, args["num_examples"], args["ex_type"], args["unanswerable_cnt"], args["formatting"])
+            if args["formatting"]:
+                prompt += f"Knolwedge: {wiki.text}\nQuestion: {q}\nBased on this knowledge, the answer is[/INST]"
+            else:
+                prompt += f"Knolwedge: {wiki.text}\nQuestion: {q}\nAnswer:[/INST]"
+        prompts.append(prompt)    
+    return prompts
+
+def build_ensemble_qa_prompt(data, model, model_name, args, instruction, encoder) -> str:
+    if args["lm"] in ["gpt-3.5-turbo-instruct", "gpt-3.5-turbo-16k"]:
+        prompt = build_qa_prompt_for_gpt(data, model, model_name, args, instruction, encoder)
+    elif args["lm"].startswith("mistral"):
+        prompts = build_ensemble_qa_prompt_for_mistral(data, model, model_name, args, instruction, encoder)
+    elif args["lm"].startswith("Llama"):
+        if "chat" in args["lm"]:
+            prompt = build_qa_prompt_for_llama_chat(data, model, model_name, args, instruction, encoder)
+        else:
+            prompt = build_qa_prompt_for_llama(data, model, model_name, args, instruction, encoder)
+    else:
+        raise NotImplementedError
+    return prompts
+
 def get_encoder(lm):
     if lm in ["gpt-3.5-turbo-instruct", "gpt-3.5-turbo-16k"]:
         return tiktoken.get_encoding("cl100k_base")
-    elif lm in ["mistral-instruct"]:
+    elif lm.startswith("mistral"):
         return AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
-    elif lm in ["llama2-7b-chat", "llama2-13b-chat"]:
+    elif lm.startswith("Llama"):
         return AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
 
 

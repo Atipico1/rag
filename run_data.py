@@ -16,20 +16,18 @@ from transformers import AutoModel, AutoTokenizer, DPRQuestionEncoder, DPRContex
 def load_nq(nlp, emb_model, tokenizer, args):
     random.seed(42)
     if not args.nq_cache:
-        dataset = QADataset.load("NQ")
-        # if args.fixed_data:
-        #     fixed_data_indices = joblib.load("datasets/fixed_data_indices")
-        #     dataset.examples = [ex for ex in dataset.examples if ex.uid in fixed_data_indices]
-        # else:
-        #     dataset.examples = random.sample(dataset.examples, args.nq_size)
+        if args.split == "test":
+            dataset = QADataset.load("NQ")
+        else:
+            dataset = QADataset.load("NQTrain")
         dataset = masking_entity(dataset, nlp, args.masking_model, batch_size=args.bs)
         dataset = sent_embedding(dataset, args.emb_model, emb_model, tokenizer, batch_size=args.bs)
         dataset.custom_save()
     else:
-        dataset= QADataset.custom_load("NQ")
-        # if args.fixed_data:
-        #     fixed_data_indices = joblib.load("datasets/fixed_data_indices")
-        #     dataset.examples = [ex for ex in dataset.examples if ex.uid in fixed_data_indices]
+        if args.split == "test":
+            dataset = QADataset.custom_load("NQ")
+        else:
+            dataset = QADataset.custom_load("NQTrain")
     if args.ent_swap:
         train_set = QADataset.load("NQTrain")
         answer_corpus_by_groups = group_answers_by_answer_type(train_set)
@@ -80,14 +78,24 @@ def load_squad(nlp, ctx_tokenizer,ctx_emb_model, emb_model, tokenizer, args):
     return dataset, context_embeddings
 
 # has_answer가 하나도 없는 경우에는 cbr 예시에서 제외
+def generate_cbr_prompt(squad: SquadDataset, dataset: QADataset, args):
+    examples, squad_examples = dataset.examples, squad.examples
+    result = []
+    for ex in tqdm(examples, desc="Generate CBR Prompt"):
+        cbrs = []
+        filtered_squad, squad_cnt = dataset_filter(ex, squad_examples, args)
+        filtered_squad_embeddings = [ex.embedding for ex in filtered_squad]
+        cbr_examples = find_topk(ex.embedding, filtered_squad_embeddings, filtered_squad, topk=args.num_ex, filter_same_questions=args.filter_same_question)
+        
+
 def generate_promptset(squad: SquadDataset, squad_ctx_embeddings: Dict, nq: QADataset, args, nlp, q_tokenizer, c_tokenizer, q_model, c_model) -> TotalPromptSet:
-    nq_test, squad_examples = nq.examples, squad.examples
+    nq_exs, squad_examples = nq.examples, squad.examples
     title_to_wiki = joblib.load("./datasets/title_to_wiki")
     #TODO : nq_train 불러오는 로직을 기존 함수와 통합시켜야 함
     nq_train: List[NQExample] = load_nq_train_data(args.bs, nlp, q_model, q_tokenizer).dataset
     result = []
     total_nq_cnt, total_squad_cnt = 0, 0
-    for nq_ex in tqdm(nq_test, desc="Generate Promptset"):
+    for nq_ex in tqdm(nq_exs, desc="Generate Promptset"):
         fewshots = []
         filtered_nq_train, nq_cnt = dataset_filter(nq_ex, nq_train, args)
         filtered_squad, squad_cnt = dataset_filter(nq_ex, squad_examples, args)
@@ -121,8 +129,8 @@ def generate_promptset(squad: SquadDataset, squad_ctx_embeddings: Dict, nq: QADa
     total_output["promptset"] = output
     total_output["metadata"] = vars(args)
     joblib.dump(total_output, f"datasets/TotalPromptSet{'-'+args.custom_name if args.custom_name else ''}.joblib")
-    print("Average NQ Same Answer Examples :", round(total_nq_cnt/len(nq_test),3))
-    print("Average SQuAD Same Answer Examples :", round(total_squad_cnt/len(nq_test),3))
+    print("Average NQ Same Answer Examples :", round(total_nq_cnt/len(nq_exs),3))
+    print("Average SQuAD Same Answer Examples :", round(total_squad_cnt/len(nq_exs),3))
     return output
 
 def load_masking_model(model_type: str):
@@ -156,6 +164,7 @@ if __name__ == "__main__":
     parser.add_argument("--ent_swap", type=str2bool, required=False, default=False)
     parser.add_argument("--swap_context_method", type=str, required=False, default="random", choices=["random", "similar"])
     parser.add_argument("--test", type=str2bool, required=False, default=False)
+    parser.add_argument("--split", type=str, required=False, default="test", choices=["train", "test"])
     args = parser.parse_args()
     metadata = vars(args)
     spacy.prefer_gpu()

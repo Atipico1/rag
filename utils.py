@@ -1,23 +1,17 @@
 import argparse
-import os
-import json
 import re
 import string
 import torch
-from tqdm import tqdm
-import openai
-from collections import Counter
-from typing import Union, Callable, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict
 import numpy as np
-import tiktoken
 from src.classes.cbr_data import NQExample
 from src.classes.qaexample import QAExample
 from src.classes.answer import Answer
 from src.classes.prompt import PromptSet
 import wikipedia
 import time
-import random
-
+import torch
+from openai import OpenAI
 def normalize_question(question: str):
     if not question.endswith("?"):
         question = question + "?"
@@ -67,17 +61,19 @@ def get_answer_from_model_output(outputs, tokenizer, prompt):
     answer = generation_str.split("\n")[0]
     return answer, generation_str
 
-def generate_answer_from_gpt(prompt: List[str], max_tokens: int):
+def generate_answer_from_gpt_ensemble(prompt: List[str], client: OpenAI, max_tokens: int):
     max_try = 0
     while max_try < 3:
         try:
-            response = openai.Completion.create(
+            response = client.completions.create(
             model="gpt-3.5-turbo-instruct",
             prompt=prompt,
             max_tokens=max_tokens,
-            temperature=0
+            seed=42,
+            temperature=0,
+            logprobs=5
             )
-            return [res["text"] for res in response["choices"]]
+            return response.choices
         except Exception as e:
             print(f"GPT API Error : {e}")
             max_try += 1
@@ -85,17 +81,39 @@ def generate_answer_from_gpt(prompt: List[str], max_tokens: int):
     print("GPT Failed to generate answer")
     return ""
 
-def get_format_prompt(num_shot:int, examples_type:str) -> str:
+def generate_answer_from_gpt(prompt: List[str], client: OpenAI, max_tokens: int):
+    max_try = 0
+    while max_try < 3:
+        try:
+            response = client.completions.create(
+            model="gpt-3.5-turbo-instruct",
+            prompt=prompt,
+            max_tokens=max_tokens,
+            seed=42,
+            temperature=0
+            )
+            return [res.text for res in response.choices]
+        except Exception as e:
+            print(f"GPT API Error : {e}")
+            max_try += 1
+            time.sleep(3)
+    print("GPT Failed to generate answer")
+    return ""
+
+def get_format_prompt(num_shot:int, num_ctx: int, examples_type:str) -> str:
     if examples_type == "zero":
         return ""
-    format_path = f"datasets/format_prompt_{examples_type}.txt"
+    format_path = f"prompt/format_prompt_{examples_type}.txt"
     output = ""
     with open(format_path, "r") as f:
         lines = f.readlines()
-    for i in range(1, num_shot*3+1):
-        output += lines[i-1]
-        if i % 3 == 0:
-            output += "\n"
+    for i in lines:
+        if "Answer:" in i:
+            output += (i + "\n")
+        else:
+            output += i
+        if output.count("Answer:") == num_shot:
+            break
     return output
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -207,7 +225,7 @@ def make_adversarial(sent_idx: int, sents: List[str], sent_len: int, adversary: 
         raise NotImplementedError
     
 def get_instruction(instruction_type: str) -> str:
-    with open("/home/seongilpark/rag/datasets/instructions.txt", "r") as f:
+    with open("prompt/instructions.txt", "r") as f:
         lines = f.readlines()
         instruct_dict = {line.split("||")[0]:line.split("||")[1].replace("\n", "")+"\n\n" for line in lines}
     return instruct_dict[instruction_type]
@@ -285,15 +303,64 @@ def determine_perturbation_type(data: PromptSet, model:dict, args: dict):
                 else:
                     return "many_relevant_ctx"
 
-def generate_answer(prompt, args):
-    pass
+def make_exp_name(args) -> str:
+    output = "" if not args.prefix else args.prefix + "-"
+    if args.test:
+        output += "TEST-"
+    output += str(args.nq_size) + "-"
+    if args.lm.startswith("gpt"):
+        output += "gpt-"
+    elif args.lm.startswith("Llama"):
+        names = args.lm.split("-")
+        output += f"{names[0]}-{names[2]}-{names[3]}-"
+    elif args.lm.startswith("mistral"):
+        output += "mistral-"
+    else:
+        output += "etc-"
+    output += (args.model_name + "-")
+    output += f"ex:{args.num_examples}-"
+    output += f"ctxs:{args.num_wiki}-"
+    output += args.ex_type
+    if args.selective_perturbation:
+        output += "-"
+        output += ",".join(args.selective_perturbation)
+    return output
 
-def get_answer_from_lm(batch_prompt: List[str], args: dict) -> str:
-    if args["lm"] == "gpt-3.5-turbo-instruct":
-        return generate_answer_from_gpt(batch_prompt, args["max_tokens"])
-    elif args["lm"] == "gpt-3.5-turbo-16k":
-        return generate_answer_from_gpt(batch_prompt, args["max_tokens"])
-    elif args["lm"] == "mistral-instruct":
-        return generate_answer(batch_prompt, args)
-    elif args["lm"] == "llama2-7b-chat":
-        return generate_answer(batch_prompt, args)
+def find_answer_in_context(answer_text: str, context: str):
+    if isinstance(context, str):
+        context_spans = [
+            (m.start(), m.end())
+            for m in re.finditer(re.escape(answer_text.lower()), context.lower())
+        ]
+        return context_spans
+    else:
+        return [""]
+
+def update_context_with_substitution_string(
+    context: str, originals:List[str], substitution: str, replace_every_string=True
+) -> str:
+    replace_spans = []
+    for orig_answer in originals:
+        replace_spans.extend(find_answer_in_context(orig_answer, context))
+    replace_strs = set([context[span[0] : span[1]] for span in replace_spans])
+    for replace_str in replace_strs:
+        context = context.replace(replace_str, substitution)
+    return context
+
+def aggregate_ensemble(answers: List[str], args: Dict) -> str:
+    print("Answers : ", answers)
+    if args["ensemble_method"] == "voting":
+        for idx, answer in enumerate(answers):
+            if "unanswerable" in answer:
+                answers[idx] = "unanswerable"   
+        if list(set(answers)) == ["unanswerable"]:
+            return "unanswerable"
+        else:
+            answers_wo_unanswerable = [answer for answer in answers if answer != "unanswerable"]
+            return max(set(answers_wo_unanswerable), key=answers_wo_unanswerable.count)
+        
+def get_answer_from_model_output(outputs, tokenizer, prompt):
+    generation_str = tokenizer.decode(outputs[0].cpu(), skip_special_tokens=True)
+    generation_str = generation_str[len(prompt):]
+    answer = generation_str.split("\n")[0]
+    return answer, generation_strs

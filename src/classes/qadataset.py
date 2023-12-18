@@ -9,9 +9,9 @@ import wget
 from src.classes.qaexample import QAExample
 from src.utils import BasicTimer, run_ner_linking
 
-ORIG_DATA_DIR = "datasets/original/"
-NORM_DATA_DIR = "datasets/normalized/"
-CUSTOM_DATA_DIR = "datasets/custom/"
+ORIG_DATA_DIR = "/data/seongil/datasets/original/"
+NORM_DATA_DIR = "/data/seongil/datasets/normalized/"
+CUSTOM_DATA_DIR = "/data/seongil/datasets/custom/"
 
 class QADataset(object):
     """
@@ -98,7 +98,8 @@ class QADataset(object):
         ), f"Preprocessed dataset should be at {preprocessed_path}."
         with gzip.open(preprocessed_path, "r") as inf:
             header = json.loads(inf.readline())
-            assert header["dataset"] == name
+            if "_all" not in name:
+                assert header["dataset"] == name
             examples = [QAExample.json_load(l) for l in inf.readlines()]
 
         print(f"Read {len(examples)} examples from {preprocessed_path}")
@@ -246,20 +247,35 @@ class SquadDataset(QADataset):
 
 class NQ(QADataset):
     def read_original_dataset(self, file_path: str):
-        examples = []
-        with gzip.open(file_path, "rb") as file_handle:
-            data = json.load(file_handle)
-            for idx, entry in enumerate(data):
-                examples.append(
+        data = []
+        with open(file_path, 'r', encoding='utf-8') as file:
+            for idx, line in enumerate(file):
+                entry = json.loads(line)
+                data.append(
                     QAExample.new(
                         uid=idx,
                         query=entry["question"],
-                        context=entry["ctxs"],
+                        context=entry["ctxs"][0]["text"],
                         answers=entry["answers"],
                         title=""
-                    )
-                )
-        return examples
+                ))
+        return data
+
+class Trivia(QADataset):
+    def read_original_dataset(self, file_path: str):
+        data = []
+        with open(file_path, 'r', encoding='utf-8') as file:
+            for idx, line in enumerate(file):
+                entry = json.loads(line)
+                data.append(
+                    QAExample.new(
+                        uid=idx,
+                        query=entry["question"],
+                        context=entry["ctxs"][0]["text"],
+                        answers=entry["answers"],
+                        title=""
+                ))
+        return data
 
 class MRQANaturalQuetsionsDataset(QADataset):
     """The QADatast for MRQA-Natural Questions.

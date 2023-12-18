@@ -1,11 +1,12 @@
 import json, joblib
 import os
+import random
 from os import path
 from tqdm import tqdm
 from typing import Any, Dict, List, Tuple, Union
 from src.classes.prompt import PromptSet
 from perturbations import add_adversarial_sentences_with_same_entity, add_conflicting_sentences, swap_context, swap_entities
-from utils import check_same_answers_in, get_answer, get_question, normalize_answer, text_has_answer
+from utils import check_same_answers_in, get_answer, get_question, normalize_answer, text_has_answer, update_context_with_substitution_string
 from src.classes.cbr_data import NQ, NQExample, WikiContext
 from src.classes.qadataset import QADataset, SquadDataset
 from src.classes.qaexample import QAExample
@@ -233,3 +234,67 @@ def find_most_similar_context(data: QADataset, context_embeddings: Dict[str, np.
         # scores = np.dot(total, query.T)
         # idx = np.argmax(scores)
         # ex.metadata = {"most_similar_context":total_text[idx]}
+
+def make_conflict_context(data: List[PromptSet], num_conflict: int, strategy: str) -> List[PromptSet]:
+    for d in data:
+        if strategy == "random":
+            rand_idx = random.sample(range(len(d.supports)), num_conflict)
+            for idx, wiki in enumerate(d.supports):
+                if idx in rand_idx:
+                    wiki.text = update_context_with_substitution_string(wiki.text, d.answers, d.substitution)
+        elif strategy == "topk":
+            conflicted_contexts = sorted(d.supports, key=lambda x: x.score, reverse=True)[:num_conflict]
+            original_contexts = sorted(d.supports, key=lambda x: x.score, reverse=True)[num_conflict:]
+            for wiki in conflicted_contexts:
+                wiki.text = update_context_with_substitution_string(wiki.text, d.answers, d.substitution)
+            d.supports = conflicted_contexts + original_contexts
+        d.answers = ["unanswerable"]
+    return data
+
+def make_perturb_testset(data: List[PromptSet], args: Dict) -> List[PromptSet]:
+    if args["perturb_testset_op"] == "swap_context":
+        has_no_answers: List[PromptSet] = list(filter(lambda x: not any([wiki.has_answer for wiki in x.supports[:args["num_wiki"]]]), data))
+        has_answers: List[PromptSet] = list(filter(lambda x: any([wiki.has_answer for wiki in x.supports[:args["num_wiki"]]]), data))
+        thres = int(len(data)*args["perturb_data_ratio"])
+        for d in has_answers:
+            if len(has_no_answers) >= thres:
+                break
+            d.supports = sorted([ctx for ctx in d.supports if not ctx.has_answer], key=lambda x: x.score, reverse=True)[:args["num_wiki"]]
+            if len(d.supports) < args["num_wiki"]:
+                continue
+            else:
+                has_no_answers.append(d)
+        return data
+    elif args["perturb_testset_op"] == "adversarial":
+        pass
+    elif args["perturb_testset_op"] == "confilct":
+        thres = int(len(data)*args["perturb_data_ratio"])
+        ctx_thres = int(args["num_wiki"]*args["perturb_context_ratio"])
+        print(f"thres: {thres}, ctx_thres: {ctx_thres}")
+        has_many_answers: List[PromptSet] = list(filter(lambda x: sum([wiki.has_answer for wiki in x.supports[:args["num_wiki"]]]) >= ctx_thres, data))
+        has_few_answers: List[PromptSet] = list(filter(lambda x: sum([wiki.has_answer for wiki in x.supports[:args["num_wiki"]]]) < ctx_thres, data))
+        print(f"has_many_answers: {len(has_many_answers)}, has_few_answers: {len(has_few_answers)}")
+        while len(has_many_answers) < thres and len(has_few_answers) > 0:
+            d = has_few_answers[-1]
+            d.supports = sorted([ctx for ctx in d.supports if ctx.has_answer], key=lambda x: x.score, reverse=True)[:args["num_wiki"]]
+            if len(d.supports) < args["num_wiki"]:
+                has_few_answers.pop()
+                continue
+            else:
+                has_many_answers.append(d)
+                has_few_answers.pop()
+        if len(has_many_answers) > thres:
+            return make_conflict_context(
+                data=has_many_answers[:thres],
+                num_conflict=ctx_thres,
+                strategy="topk") + has_many_answers[thres:] + has_few_answers
+        else: # len(has_many_answers) == thres
+            return make_conflict_context(
+                data=has_many_answers[:thres],
+                num_conflict=ctx_thres,
+                strategy="topk") + has_few_answers
+    elif args["perturb_testset_op"] == "entity_swap":
+        pass
+    else:
+        pass
+        

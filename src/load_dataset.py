@@ -8,7 +8,6 @@ import json
 import typing
 
 import wget
-
 from src.classes.qadataset import *
 from src.utils import argparse_str2bool
 
@@ -31,14 +30,22 @@ DATASETS = {
         SquadDataset,
         "squad",
     ),
-    "NQ":{
+    "NQTest":(
         NQ,
-        "https://dl.fbaipublicfiles.com/dpr/data/retriever_results/single/nq-test.json.gz"
-    },
-    "NQTrain":{
+        "/data/seongil/contriever/contriever_nq/test.jsonl"
+    ),
+    "NQTrain":(
         NQ,
-        "https://dl.fbaipublicfiles.com/dpr/data/retriever_results/single/nq-train.json.gz"
-    }
+        "/data/seongil/contriever/contriever_nq/train.jsonl"
+    ),
+    "TriviaTest":(
+        Trivia,
+        "/data/seongil/contriever/contriever_trivia/test.jsonl"
+    ),
+    "TriviaTrain":(
+        Trivia,
+        "/data/seongil/contriever/contriever_trivia/train.jsonl"
+    ),
 }
 
 def load_and_preprocess_dataset(args):

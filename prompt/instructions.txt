@@ -1,2 +1,7 @@
-find||Using the provided knowledge, answer these questions. If the answer to the question cannot be found in the provided knowledge, please respond with 'unanswerable'.
-base||Using the provided knowledge, answer these questions. If you cannot answer based on the provided knowledge, please respond with 'unanswerable'.
+find||Answer the following question based on the provided knowledge. If you cannot find the answer in the provided knowledge, please respond with 'unanswerable'.
+conflict||Answer the following question based on the provided knowledge. If you encounter any inconsistencies within the pieces of knowledge, please respond with 'conflict'. 
+base||Answer the following question based on the provided knowledge.
+documents||Answer the following question based on the provided knowledge. If there is any inconsistency or contradiction between the documents provided, please respond with 'conflict'.
+point||Answer the following question based on the provided knowledge. If the documents suggest different answers, please respond with 'conflict'.
+gpt||Answer the following question based on the provided knowledge. If there is any inconsistency or contradiction between the documents provided, please respond with 'conflict'.
+gpt_explain||Answer the following question based on the provided knowledge. If there is any inconsistency or contradiction between the documents provided, please respond with 'conflict' and clearly indicate the sentences that contain these conflicts.
